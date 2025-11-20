@@ -158,11 +158,9 @@ if(SERVER) then
 	local function FindInBox(min, max, ply)
 		local PPCheck = (tobool(ply:GetInfo("advdupe2_copy_only_mine")) and ply.CPPIGetOwner~=nil) and PlayerCanDupeCPPI or PlayerCanDupeTool
 		local EntTable = {}
-		for _, ent in ents.Iterator() do
-			local pos = ent:GetPos()
-			if (pos.X>=min.X) and (pos.X<=max.X) and
-				 (pos.Y>=min.Y) and (pos.Y<=max.Y) and
-				 (pos.Z>=min.Z) and (pos.Z<=max.Z) and PPCheck( ply, ent ) then
+
+		for _, ent in ipairs(ents.FindInBox(min, max)) do
+			if PPCheck(ply, ent) then
 				EntTable[ent:EntIndex()] = ent
 			end
 		end
@@ -199,6 +197,11 @@ if(SERVER) then
 		Params: <trace> trace
 		Returns: <boolean> success
 	]]
+	local messages = {
+		["Pasting"] = "pasting.",
+		["Downloading"] = "downloading.",
+		["Uploading"] = "uploading."
+	}
 	function TOOL:LeftClick( trace )
 		if(not trace) then return false end
 
@@ -207,9 +210,11 @@ if(SERVER) then
 
 		if not (dupe and dupe.Entities) then return false end
 
-		if(dupe.Pasting or dupe.Downloading) then
-			AdvDupe2.Notify(ply,"Advanced Duplicator 2 is busy.",NOTIFY_ERROR)
-			return false
+		for key, msg in pairs(messages) do
+			if dupe[key] then
+				AdvDupe2.Notify(ply, "Advanced Duplicator 2 is busy " .. msg, NOTIFY_ERROR)
+				return false
+			end
 		end
 
 		dupe.Angle = GetDupeAngleOffset(ply)
@@ -411,7 +416,7 @@ if(SERVER) then
 			return
 		else
 			if(dupe.Uploading) then
-				AdvDupe2.InitProgressBar(ply, "Opening: ")
+				AdvDupe2.InitProgressBar(ply, "Uploading: ")
 				return
 			elseif(dupe.Downloading) then
 				AdvDupe2.InitProgressBar(ply, "Saving: ")
@@ -544,8 +549,14 @@ if(SERVER) then
 				tonumber(ply:GetInfo("advdupe2_contr_spawner_addvel")) or 1,
 				tonumber(ply:GetInfo("advdupe2_contr_spawner_hideprops")) or 0)
 
+			if not spawner then
+				return false
+			end
+
+			local undotxt = "AdvDupe2: Spawner ["..tostring(spawner:EntIndex()).."]"..(dupe.Name and "("..tostring(dupe.Name)..")" or "")
+
 			ply:AddCleanup( "AdvDupe2", spawner )
-			undo.Create("gmod_contr_spawner")
+			undo.Create( undotxt )
 				undo.AddEntity( spawner )
 				undo.SetPlayer( ply )
 			undo.Finish()
@@ -788,7 +799,7 @@ if(SERVER) then
 			Tab.Description = dupe.AutoSaveDesc
 
 			AdvDupe2.Encode( Tab, AdvDupe2.GenerateDupeStamp(ply), function(data)
-				AdvDupe2.SendToClient(ply, data, 1)
+				AdvDupe2.SendToClient(ply, data, true)
 			end)
 			dupe.FileMod = CurTime()+tonumber(GetConVarString("AdvDupe2_FileModificationDelay"))
 		end)
@@ -804,12 +815,13 @@ if(SERVER) then
 	end)
 
 	concommand.Add("AdvDupe2_SaveMap", function(ply, cmd, args)
-		if(not ply:IsAdmin()) then
+		if not ply:IsSuperAdmin() then
 			AdvDupe2.Notify(ply, "You do not have permission to this function.", NOTIFY_ERROR)
 			return
 		end
 
 		local Entities = {}
+
 		for _, v in ents.Iterator() do
 			if not v:CreatedByMap() and AdvDupe2.duplicator.IsCopyable(v) then
 				Entities[v:EntIndex()] = v
@@ -817,32 +829,35 @@ if(SERVER) then
 		end
 
 		local _, HeadEnt = next(Entities)
-		if not HeadEnt then return end
+		if not HeadEnt then AdvDupe2.Notify(ply, "There is nothing to save!", NOTIFY_ERROR) return end
 
-		local Tab = {Entities={}, Constraints={}, HeadEnt={}, Description=""}
+		local Tab = {Entities = {}, Constraints = {}, HeadEnt = {}, Description = ""}
 		Tab.HeadEnt.Index = HeadEnt:EntIndex()
 		Tab.HeadEnt.Pos = HeadEnt:GetPos()
 
 		local WorldTrace = util.TraceLine({
 			mask   = MASK_NPCWORLDSTATIC,
-			start  = Tab.HeadEnt.Pos + Vector(0,0,1),
-			endpos = Tab.HeadEnt.Pos - Vector(0,0,50000)
+			start  = Tab.HeadEnt.Pos + Vector(0, 0, 1),
+			endpos = Tab.HeadEnt.Pos - Vector(0, 0, 50000)
 		})
 
 		Tab.HeadEnt.Z = WorldTrace.Hit and math.abs(Tab.HeadEnt.Pos.Z - WorldTrace.HitPos.Z) or 0
 		Tab.Entities, Tab.Constraints = AdvDupe2.duplicator.AreaCopy(ply, Entities, Tab.HeadEnt.Pos, true)
 		Tab.Constraints = GetSortedConstraints(ply, Tab.Constraints)
-
 		Tab.Map = true
-		AdvDupe2.Encode( Tab, AdvDupe2.GenerateDupeStamp(ply), function(data)
+
+		AdvDupe2.Encode(Tab, AdvDupe2.GenerateDupeStamp(ply), function(data)
 			if #data > AdvDupe2.MaxDupeSize then
-				AdvDupe2.Notify(ply, "Copied duplicator filesize is too big!",NOTIFY_ERROR)
-				return 
+				AdvDupe2.Notify(ply, "Copied duplicator filesize is too big!", NOTIFY_ERROR)
+				return
 			end
-			if(not file.IsDir("advdupe2_maps", "DATA")) then
-				file.CreateDir("advdupe2_maps")
-			end
-			file.Write("advdupe2_maps/"..args[1]..".txt", data)
+
+			local map = game.GetMap()
+			file.CreateDir("advdupe2/maps/" .. map)
+
+			local savename = AdvDupe2.SanitizeFilename(args[1] and #args[1] > 0 and args[1] or util.DateStamp())
+			file.Write("advdupe2/maps/" .. map .. "/" .. savename .. ".txt", data)
+
 			AdvDupe2.Notify(ply, "Map save, saved successfully.")
 		end)
 	end)
@@ -994,14 +1009,29 @@ if(CLIENT) then
 		return AdvDupe2.Rotation
 	end
 
-	language.Add( "Tool.advdupe2.name",	"Advanced Duplicator 2" )
-	language.Add( "Tool.advdupe2.desc",	"Duplicate things." )
-	language.Add( "Tool.advdupe2.0",	"Primary: Paste, Secondary: Copy, Secondary+World: Select/Deselect All, Secondary+Shift: Area copy." )
-	language.Add( "Tool.advdupe2.1",	"Primary: Paste, Secondary: Copy an area, Reload: Autosave an area, Secondary+Shift: Cancel." )
-	language.Add( "Undone_AdvDupe2",	"Undone AdvDupe2 paste" )
-	language.Add( "Cleanup_AdvDupe2",	"AdvDupe2 Duplications" )
-	language.Add( "Cleaned_AdvDupe2",	"Cleaned up all AdvDupe2 Duplications" )
-	language.Add( "SBoxLimit_AdvDupe2",	"You've reached the AdvDupe2 Duplicator limit!" )
+	TOOL.Information = {
+		{ name = "left" },
+		{ name = "right", stage = 0 },
+		{ name = "right_world", stage = 0, icon2 = "icon16/world.png" },
+		{ name = "right_shift", stage = 0, icon2 = "gui/info" },
+		{ name = "right_alt", stage = 1 },
+		{ name = "reload_alt", stage = 1 },
+		{ name = "right_shift_alt", stage = 1, icon2 = "gui/info" },
+	}
+
+	language.Add( "Tool.advdupe2.name",				"Advanced Duplicator 2" )
+	language.Add( "Tool.advdupe2.desc",				"Duplicate things." )
+	language.Add( "Tool.advdupe2.left",				"Paste" )
+	language.Add( "Tool.advdupe2.right",			"Copy" )
+	language.Add( "Tool.advdupe2.right_world",		"Hit the world to select/deselect all" )
+	language.Add( "Tool.advdupe2.right_shift",		"Press Shift to area copy" )
+	language.Add( "Tool.advdupe2.right_alt",		"Copy an area" )
+	language.Add( "Tool.advdupe2.reload_alt",		"Autosave an area" )
+	language.Add( "Tool.advdupe2.right_shift_alt",	"Press Shift to cancel" )
+	language.Add( "Undone_AdvDupe2",				"Undone AdvDupe2 paste" )
+	language.Add( "Cleanup_AdvDupe2",				"AdvDupe2 Duplications" )
+	language.Add( "Cleaned_AdvDupe2",				"Cleaned up all AdvDupe2 Duplications" )
+	language.Add( "SBoxLimit_AdvDupe2",				"You've reached the AdvDupe2 Duplicator limit!" )
 
 	CreateClientConVar("advdupe2_offset_world", 0, false, true)
 	CreateClientConVar("advdupe2_offset_z", 0, false, true)
@@ -1016,7 +1046,8 @@ if(CLIENT) then
 	CreateClientConVar("advdupe2_preserve_freeze", 0, false, true)
 	CreateClientConVar("advdupe2_copy_outside", 0, false, true)
 	CreateClientConVar("advdupe2_copy_only_mine", 1, false, true)
-	CreateClientConVar("advdupe2_limit_ghost", 100, false, true)
+	CreateClientConVar("advdupe2_limit_ghost", 100, false, true, nil, 0, 100)
+	CreateClientConVar("advdupe2_ghost_rate", 5, true, true, nil, 1, 50)
 	CreateClientConVar("advdupe2_area_copy_size", 300, false, true)
 	CreateClientConVar("advdupe2_auto_save_contraption", 0, false, true)
 	CreateClientConVar("advdupe2_auto_save_overwrite", 1, false, true)
@@ -1121,6 +1152,7 @@ if(CLIENT) then
 		Check:SetToolTip( "Orders constraints so that they build a rigid constraint system." )
 		CPanel:AddItem(Check)
 
+		-- Ghost Percentage
 		local NumSlider = vgui.Create( "DNumSlider" )
 		NumSlider:SetText( "Ghost Percentage:" )
 		NumSlider.Label:SetDark(true)
@@ -1138,6 +1170,18 @@ if(CLIENT) then
 		NumSlider.Wang.Panel.OnLoseFocus = function(txtBox) func3(txtBox) AdvDupe2.StartGhosting() end
 		CPanel:AddItem(NumSlider)
 
+		-- Ghost Rate
+		NumSlider = vgui.Create( "DNumSlider" )
+		NumSlider:SetText( "Ghost speed:" )
+		NumSlider.Label:SetDark(true)
+		NumSlider:SetMin( 1 )
+		NumSlider:SetMax( 50 )
+		NumSlider:SetDecimals( 0 )
+		NumSlider:SetConVar( "advdupe2_ghost_rate" )
+		NumSlider:SetToolTip("Change how quickly the ghosts are generated")
+		CPanel:AddItem(NumSlider)
+
+		-- Area Copy Size
 		NumSlider = vgui.Create( "DNumSlider" )
 		NumSlider:SetText( "Area Copy Size:" )
 		NumSlider.Label:SetDark(true)
@@ -1603,7 +1647,6 @@ if(CLIENT) then
 			btn2:SizeToContents()
 			btn2:SetToolTip("Save Map")
 			btn2.DoClick = 	function()
-				if(txtbox2:GetValue()=="") then return end
 				RunConsoleCommand("AdvDupe2_SaveMap", txtbox2:GetValue())
 			end
 			txtbox2.OnEnter = function()
@@ -1688,15 +1731,11 @@ if(CLIENT) then
 	end
 
 
-	local function FindInBox(min, max, ply)
+	local function FindInBox(min, max)
 		local EntTable = {}
-		for _,ent in ents.Iterator() do
-			local pos = ent:GetPos()
-			if (pos.X>=min.X) and (pos.X<=max.X) and (pos.Y>=min.Y) and (pos.Y<=max.Y) and (pos.Z>=min.Z) and (pos.Z<=max.Z) then
-				--if(ent:GetClass()~="C_BaseFlexclass") then
-					EntTable[ent:EntIndex()] = ent
-				--end
-			end
+
+		for _, ent in ipairs(ents.FindInBox(min, max)) do
+			EntTable[ent:EntIndex()] = ent
 		end
 
 		return EntTable
